@@ -1,0 +1,60 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: ai-engineering-workspace
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ai_engineering}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+  jpa:
+    hibernate:
+      ddl-auto: update   # dev convenience only - use Flyway/Liquibase migrations for production
+    properties:
+      hibernate:
+        format_sql: true
+    show-sql: false
+
+jwt:
+  secret: ${JWT_SECRET:change-this-to-a-long-random-secret-in-prod-min-256-bits}
+  access-token-expiry-minutes: ${JWT_ACCESS_EXPIRY:15}
+  refresh-token-expiry-days: ${JWT_REFRESH_EXPIRY:7}
+
+github:
+  client-id: ${GITHUB_CLIENT_ID:}
+  client-secret: ${GITHUB_CLIENT_SECRET:}
+  redirect-uri: ${GITHUB_REDIRECT_URI:http://localhost:8080/auth/github/callback}
+  scope: "repo,read:user,user:email"
+
+encryption:
+  # 32-byte (256-bit) base64 key for AES-GCM encryption of stored GitHub tokens
+  secret-key: ${ENCRYPTION_SECRET_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+
+app:
+  frontend-url: ${FRONTEND_URL:http://localhost:3000}
+  repo-storage-path: ${REPO_STORAGE_PATH:/data/repos}
+  # Dev default is permissive ("*") so the test harness works out of the box -
+  # tighten to your real frontend's origin(s) before deploying anywhere real.
+  cors-allowed-origins: ${CORS_ALLOWED_ORIGINS:*}
+
+python-service:
+  base-url: ${PYTHON_SERVICE_URL:http://localhost:8000}
+
+internal:
+  # Shared secret Python must send back on the /internal/repos/{id}/index-status
+  # callback. MUST match python-service's INTERNAL_SERVICE_SECRET exactly.
+  # REQUIRED - the app now REFUSES TO START if this is blank (see
+  # InternalRepoController's constructor). Set it to any placeholder value
+  # for local dev; use a real generated secret anywhere shared/deployed.
+  service-secret: ${INTERNAL_SERVICE_SECRET:}
+
+# Whether the short-lived OAuth "state" cookie requires HTTPS. False for
+# local http development; set true in any real deployment.
+cookie:
+  secure: ${COOKIE_SECURE:false}
+
+logging:
+  level:
+    com.aiengineering: DEBUG
+    org.springframework.security: INFO

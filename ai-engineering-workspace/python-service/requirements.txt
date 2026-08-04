@@ -1,0 +1,27 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+
+# LangChain core + integrations
+langchain==0.3.1
+langchain-community==0.3.1
+langchain-anthropic==0.2.1
+
+# Embeddings - local model, no API key required to get started.
+# Swap for langchain-openai's OpenAIEmbeddings later if you want higher
+# retrieval quality and don't mind the API cost/dependency.
+sentence-transformers==3.1.1
+langchain-huggingface==0.1.0
+
+# Text splitting (RecursiveCharacterTextSplitter)
+langchain-text-splitters==0.3.0
+
+# Vector store (pgvector extension on the SAME Postgres the Java service uses)
+langchain-postgres==0.0.12
+psycopg[binary]==3.2.1
+
+# Calling back to the Java service when indexing finishes
+httpx==0.27.2
+
+# Config
+pydantic-settings==2.5.2
+python-dotenv==1.0.1

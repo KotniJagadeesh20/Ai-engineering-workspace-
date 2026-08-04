@@ -1,0 +1,71 @@
+version: "3.9"
+
+# The fix for "Java clones to a path Python can't see": both java-service
+# and python-service mount the SAME named volume at the SAME path
+# (/workspace/repos). Java writes cloned repos there; Python reads from
+# there when it indexes. The repo_path string that crosses the HTTP
+# boundary (Java's IndexingClient -> Python's /index) only means anything
+# because both containers agree on where that path actually lives on disk.
+#
+# This also sets up Phase 2 cleanly: the coding agent's sandbox will need
+# the same access pattern (read/write into a shared repo checkout), so this
+# volume is the foundation that phase builds on too, not a Phase-1-only fix.
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ai_engineering
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  java-service:
+    build: ./java-service
+    ports:
+      - "8080:8080"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/ai_engineering
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      JWT_SECRET: ${JWT_SECRET:?set a real value - see java-service/README.md}
+      ENCRYPTION_SECRET_KEY: ${ENCRYPTION_SECRET_KEY:?set a real value - see java-service/README.md}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set your GitHub OAuth App client id}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set your GitHub OAuth App client secret}
+      GITHUB_REDIRECT_URI: http://localhost:8080/auth/github/callback
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5500}
+      REPO_STORAGE_PATH: /workspace/repos
+      PYTHON_SERVICE_URL: http://python-service:8000
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?set a real value - must match python-service's}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+    volumes:
+      - repo-data:/workspace/repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  python-service:
+    build: ./python-service
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/ai_engineering
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set your Anthropic API key}
+      JAVA_SERVICE_URL: http://java-service:8080
+      INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?set a real value - must match java-service's}
+    volumes:
+      - repo-data:/workspace/repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  repo-data:

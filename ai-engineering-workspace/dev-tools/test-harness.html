@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>AI Engineering Workspace — Phase 1 Test Harness</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #2a2e38;
+    --text: #e6e8ec; --muted: #9aa0ac; --accent: #5b8cff;
+    --ok: #3ecf8e; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 24px; line-height: 1.5;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; max-width: 1100px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel.full { grid-column: 1 / -1; }
+  h2 { font-size: 14px; margin: 0 0 12px; color: var(--accent); }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  input, textarea, select {
+    width: 100%; background: #0d0f13; border: 1px solid var(--border);
+    color: var(--text); border-radius: 6px; padding: 8px 10px; font-size: 13px;
+    font-family: ui-monospace, monospace;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    background: var(--accent); color: white; border: none; border-radius: 6px;
+    padding: 8px 14px; font-size: 13px; cursor: pointer; margin-top: 10px; margin-right: 6px;
+  }
+  button.secondary { background: #2a2e38; }
+  button:hover { opacity: 0.9; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-dot.on { background: var(--ok); }
+  .status-dot.off { background: var(--err); }
+  .repo-item {
+    padding: 8px; border: 1px solid var(--border); border-radius: 6px;
+    margin-top: 6px; font-size: 12px; cursor: pointer; display: flex; justify-content: space-between;
+  }
+  .repo-item:hover { border-color: var(--accent); }
+  .badge {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #2a2e38; color: var(--muted);
+  }
+  .badge.READY { background: #1f3d2e; color: var(--ok); }
+  .badge.FAILED { background: #3d1f1f; color: var(--err); }
+  #log {
+    background: #0a0c0f; border: 1px solid var(--border); border-radius: 6px;
+    padding: 10px; font-family: ui-monospace, monospace; font-size: 11px;
+    max-height: 320px; overflow-y: auto; white-space: pre-wrap; word-break: break-all;
+  }
+  .log-line { padding: 4px 0; border-bottom: 1px solid #1a1d24; }
+  .log-line.err { color: var(--err); }
+  .log-line.ok { color: var(--ok); }
+  .muted { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+
+<h1>AI Engineering Workspace — Phase 1 Test Harness</h1>
+<div class="sub">
+  Plain HTML + fetch, no build step. This is a dev tool, not the product UI —
+  see the "when does a real frontend become worth it" note in the project README.
+</div>
+
+<div class="grid">
+
+  <!-- CONFIG -->
+  <div class="panel full">
+    <h2>Config</h2>
+    <div class="grid" style="grid-template-columns: 1fr 1fr; gap: 12px;">
+      <div>
+        <label>Java service base URL</label>
+        <input id="javaBaseUrl" value="http://localhost:8080" />
+      </div>
+      <div>
+        <label>Python service base URL (health check only — everything else routes through Java)</label>
+        <input id="pythonBaseUrl" value="http://localhost:8000" />
+      </div>
+    </div>
+    <button onclick="checkHealth()">Check both services</button>
+    <span id="healthResult" class="muted"></span>
+  </div>
+
+  <!-- AUTH -->
+  <div class="panel">
+    <h2><span id="authDot" class="status-dot off"></span>Auth</h2>
+
+    <button onclick="startLogin()">1. Login with GitHub</button>
+    <div class="muted" style="margin-top:6px;">
+      Opens GitHub's consent screen in a new tab. After you approve, Java
+      redirects to <code>{frontendUrl}/auth/callback?code=...</code> — that
+      path likely won't resolve to anything (expected, no page lives there
+      yet). Copy just the <code>code</code> value out of the browser's
+      address bar and paste it below. It's short-lived (60s) and single-use —
+      exchanging it swaps it for the real tokens, which never appear in any URL.
+    </div>
+
+    <label>Login code (from the redirect URL)</label>
+    <input id="loginCode" placeholder="paste the code param here" />
+    <button onclick="exchangeCode()">2. Exchange for tokens</button>
+
+    <div style="margin-top: 10px;">
+      <button class="secondary" onclick="refreshAccessToken()">Refresh access token</button>
+      <button class="secondary" onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <!-- GITHUB REPOS -->
+  <div class="panel">
+    <h2>Browse GitHub Repos</h2>
+    <button onclick="listAvailableRepos()">List my GitHub repos</button>
+    <div id="availableRepos"></div>
+  </div>
+
+  <!-- CONNECT -->
+  <div class="panel">
+    <h2>Connect a Repo</h2>
+    <label>GitHub URL</label>
+    <input id="connectUrl" placeholder="https://github.com/owner/repo.git" />
+    <button onclick="connectRepo()">Connect + start indexing</button>
+  </div>
+
+  <!-- MY REPOS -->
+  <div class="panel">
+    <h2>My Connected Repos</h2>
+    <button onclick="listMyRepos()">Refresh list</button>
+    <div id="myRepos"></div>
+  </div>
+
+  <!-- QUERY -->
+  <div class="panel full">
+    <h2>Ask a Question</h2>
+    <label>Repo (click one above to select, or paste an id)</label>
+    <input id="queryRepoId" placeholder="repo id" />
+    <label>Question</label>
+    <textarea id="questionText" placeholder="How are payments processed?"></textarea>
+    <button onclick="askQuestion()">Ask</button>
+    <div id="answerBox" style="margin-top: 10px;"></div>
+  </div>
+
+  <!-- LOG -->
+  <div class="panel full">
+    <h2>Request Log</h2>
+    <div id="log"></div>
+  </div>
+
+</div>
+
+<script>
+// In-memory only, on purpose — this file can render inside tools that don't
+// support browser storage. If you're running this purely locally and want
+// tokens to survive a page reload, feel free to swap these for localStorage
+// yourself; that's a deliberate simplification here, not a hard requirement.
+let state = { accessToken: null, refreshToken: null };
+
+function javaUrl() { return document.getElementById('javaBaseUrl').value.replace(/\/$/, ''); }
+function pythonUrl() { return document.getElementById('pythonBaseUrl').value.replace(/\/$/, ''); }
+
+function log(label, ok, data) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'log-line ' + (ok ? 'ok' : 'err');
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${label} → ` +
+    (typeof data === 'string' ? data : JSON.stringify(data));
+  el.prepend(line);
+}
+
+async function call(method, url, body, auth = true) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (auth && state.accessToken) headers['Authorization'] = 'Bearer ' + state.accessToken;
+
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  let data = null;
+  try { data = await res.json(); } catch (e) { /* empty body, e.g. 204 */ }
+
+  if (!res.ok) {
+    log(`${method} ${url}`, false, data || res.status);
+    throw new Error((data && data.message) || `HTTP ${res.status}`);
+  }
+  log(`${method} ${url}`, true, data || 'OK');
+  return data;
+}
+
+async function checkHealth() {
+  const resultEl = document.getElementById('healthResult');
+  resultEl.textContent = 'checking...';
+  const results = [];
+  try {
+    await fetch(javaUrl() + '/actuator/health');
+    results.push('Java: reachable');
+  } catch { results.push('Java: NOT reachable'); }
+  try {
+    await fetch(pythonUrl() + '/health');
+    results.push('Python: reachable');
+  } catch { results.push('Python: NOT reachable'); }
+  resultEl.textContent = results.join('  ·  ');
+}
+
+function startLogin() {
+  window.open(javaUrl() + '/auth/github/login', '_blank');
+}
+
+async function exchangeCode() {
+  const code = document.getElementById('loginCode').value.trim();
+  if (!code) { alert('Paste the code from the redirect URL first.'); return; }
+  try {
+    const data = await call('POST', javaUrl() + '/auth/exchange', { code }, false);
+    state.accessToken = data.accessToken;
+    state.refreshToken = data.refreshToken;
+    document.getElementById('authDot').className = 'status-dot on';
+  } catch (e) { /* already logged */ }
+}
+
+async function refreshAccessToken() {
+  if (!state.refreshToken) { alert('No refresh token saved yet.'); return; }
+  try {
+    const data = await call('POST', javaUrl() + '/auth/refresh', { refreshToken: state.refreshToken }, false);
+    state.accessToken = data.accessToken;
+    document.getElementById('accessToken').value = data.accessToken;
+    document.getElementById('authDot').className = 'status-dot on';
+  } catch (e) { /* already logged */ }
+}
+
+async function logout() {
+  if (!state.refreshToken) return;
+  try {
+    await call('POST', javaUrl() + '/auth/logout', { refreshToken: state.refreshToken }, false);
+    state = { accessToken: null, refreshToken: null };
+    document.getElementById('authDot').className = 'status-dot off';
+  } catch (e) { /* already logged */ }
+}
+
+async function listAvailableRepos() {
+  try {
+    const repos = await call('GET', javaUrl() + '/api/repos/github/available');
+    const container = document.getElementById('availableRepos');
+    container.innerHTML = '';
+    (repos || []).forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'repo-item';
+      div.innerHTML = `<span>${r.fullName}</span><span class="badge">${r.private ? 'private' : 'public'}</span>`;
+      div.onclick = () => { document.getElementById('connectUrl').value = r.cloneUrl; };
+      container.appendChild(div);
+    });
+  } catch (e) { /* already logged */ }
+}
+
+async function connectRepo() {
+  const url = document.getElementById('connectUrl').value.trim();
+  if (!url) { alert('Enter a GitHub URL first.'); return; }
+  try {
+    await call('POST', javaUrl() + '/api/repos/connect', { githubUrl: url });
+    await listMyRepos();
+  } catch (e) { /* already logged */ }
+}
+
+async function listMyRepos() {
+  try {
+    const repos = await call('GET', javaUrl() + '/api/repos');
+    const container = document.getElementById('myRepos');
+    container.innerHTML = '';
+    (repos || []).forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'repo-item';
+      div.innerHTML = `<span>${r.owner}/${r.name}</span><span class="badge ${r.status}">${r.status}</span>`;
+      div.onclick = () => { document.getElementById('queryRepoId').value = r.id; };
+      container.appendChild(div);
+    });
+  } catch (e) { /* already logged */ }
+}
+
+async function askQuestion() {
+  const repoId = document.getElementById('queryRepoId').value.trim();
+  const question = document.getElementById('questionText').value.trim();
+  if (!repoId || !question) { alert('Pick a repo and enter a question.'); return; }
+
+  const box = document.getElementById('answerBox');
+  box.textContent = 'asking...';
+  try {
+    // Goes through Java, not straight to Python - Java checks ownership +
+    // that indexing is READY before proxying to Python's /rag/query.
+    const data = await call('POST', javaUrl() + `/api/repos/${repoId}/query`, { question });
+    box.innerHTML = `<div><b>Answer:</b> ${data.answer}</div>` +
+      `<div class="muted" style="margin-top:6px;">Sources: ${(data.sources || []).join(', ') || 'none'}</div>`;
+  } catch (e) {
+    box.textContent = 'Error — see log below.';
+  }
+}
+</script>
+
+</body>
+</html>
