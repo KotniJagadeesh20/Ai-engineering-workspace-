@@ -125,7 +125,7 @@ public class RefreshToken {
     private UUID id;
 
     @Column(unique = true, nullable = false)
-    private String token;          // opaque UUID string, NOT a JWT
+    private String tokenHash;      // SHA-256 hash of the opaque token, NOT the raw value
 
     @Column(nullable = false)
     private UUID userId;
@@ -188,13 +188,14 @@ public class AuthService {
 
     public AuthResponse login(User user) {
         String accessToken = jwtService.generateAccessToken(user);
-        RefreshToken refreshToken = issueRefreshToken(user.getId());
-        return new AuthResponse(accessToken, refreshToken.getToken(),
+        String rawRefreshToken = issueRefreshToken(user.getId());
+        return new AuthResponse(accessToken, rawRefreshToken,
                                  jwtService.getAccessTokenExpirySeconds());
     }
 
     public AuthResponse refresh(String refreshTokenValue) {
-        RefreshToken stored = refreshTokenRepository.findByToken(refreshTokenValue)
+        String hash = TokenUtil.sha256Hex(refreshTokenValue);
+        RefreshToken stored = refreshTokenRepository.findByTokenHash(hash)
             .filter(rt -> !rt.isRevoked() && rt.getExpiresAt().isAfter(Instant.now()))
             .orElseThrow(() -> new UnauthorizedException("Invalid or expired refresh token"));
 
@@ -202,23 +203,26 @@ public class AuthService {
             .orElseThrow(() -> new UnauthorizedException("User no longer exists"));
 
         String newAccessToken = jwtService.generateAccessToken(user);
-        return new AuthResponse(newAccessToken, stored.getToken(),
+        return new AuthResponse(newAccessToken, refreshTokenValue,
                                  jwtService.getAccessTokenExpirySeconds());
     }
 
     public void logout(String refreshTokenValue) {
-        refreshTokenRepository.findByToken(refreshTokenValue).ifPresent(rt -> {
+        String hash = TokenUtil.sha256Hex(refreshTokenValue);
+        refreshTokenRepository.findByTokenHash(hash).ifPresent(rt -> {
             rt.setRevoked(true);
             refreshTokenRepository.save(rt);
         });
     }
 
-    private RefreshToken issueRefreshToken(UUID userId) {
-        RefreshToken rt = new RefreshToken();
-        rt.setToken(UUID.randomUUID().toString());
-        rt.setUserId(userId);
-        rt.setExpiresAt(Instant.now().plus(refreshTokenExpiryDays, ChronoUnit.DAYS));
-        return refreshTokenRepository.save(rt);
+    private String issueRefreshToken(UUID userId) {
+        String rawToken = TokenUtil.generateOpaqueToken();
+        RefreshToken refreshToken = new RefreshToken();
+        refreshToken.setTokenHash(TokenUtil.sha256Hex(rawToken));
+        refreshToken.setUserId(userId);
+        refreshToken.setExpiresAt(Instant.now().plus(refreshTokenExpiryDays, ChronoUnit.DAYS));
+        refreshTokenRepository.save(refreshToken);
+        return rawToken;
     }
 }
 ```
@@ -255,7 +259,8 @@ public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Excepti
         .csrf(AbstractHttpConfigurer::disable)
         .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
         .authorizeHttpRequests(auth -> auth
-            .requestMatchers("/auth/github/**", "/auth/refresh", "/actuator/health").permitAll()
+            .requestMatchers("/auth/github/**", "/auth/exchange", "/auth/refresh", "/actuator/health").permitAll()
+            .requestMatchers("/internal/**").permitAll()
             .anyRequest().authenticated()
         )
         .addFilterBefore(new JwtAuthFilter(jwtService), UsernamePasswordAuthenticationFilter.class);
@@ -263,12 +268,17 @@ public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Excepti
 }
 ```
 
-**Step 6 — `AuthController`: exposes refresh/logout** (login is issued as part of the GitHub callback — see Flow B)
+**Step 6 — `AuthController`: exposes exchange/refresh/logout** (login is issued as part of the GitHub callback — see Flow B)
 
 ```java
 @RestController
 @RequestMapping("/auth")
 public class AuthController {
+
+    @PostMapping("/exchange")
+    public ResponseEntity<AuthResponse> exchange(@Valid @RequestBody ExchangeCodeRequest req) {
+        return ResponseEntity.ok(loginCodeService.consumeCode(req.code()));
+    }
 
     @PostMapping("/refresh")
     public ResponseEntity<AuthResponse> refresh(@Valid @RequestBody RefreshRequest req) {
@@ -293,13 +303,19 @@ public class AuthController {
 Browser → GET /auth/github/login
    │
    ▼
-Redirect to GitHub's authorize page
+Generate random state, store in short-lived HttpOnly cookie
+   │
+   ▼
+Redirect to GitHub's authorize page (with state)
    │
    ▼
 User approves
    │
    ▼
-GitHub → GET /auth/github/callback?code=...
+GitHub → GET /auth/github/callback?code=...&state=...
+   │
+   ▼
+Compare returned state against cookie - reject on mismatch (CSRF protection)
    │
    ▼
 Exchange code for GitHub access token
@@ -317,7 +333,10 @@ Encrypt + store GitHub token → GitHubCredential
 Issue OUR OWN access + refresh tokens (Flow A, step 3: AuthService.login)
    │
    ▼
-Redirect browser back to frontend with our tokens
+Issue a short-lived, single-use exchange code (see section 8.3)
+   │
+   ▼
+Redirect browser back to frontend with ONLY that code (never the tokens)
 ```
 
 **Critical distinction:** the GitHub token obtained here is never handed to the frontend and never used as our session token. It's stored encrypted, server-side only, and used later when our backend needs to act on GitHub on the user's behalf (clone a private repo, eventually push/PR in Phase 3).
@@ -441,7 +460,9 @@ public class GitHubOAuthService {
 }
 ```
 
-**Step 4 — `GitHubAuthController`: ties the whole flow together end to end**
+**ARCHITECTURAL NOTE, carried through to the actual code:** this class does double duty as both IDENTITY (`upsertUser`) and INTEGRATION (`storeGitHubCredential`). That's a deliberate simplification, not an oversight — GitHub is currently the ONLY way to become a platform user at all, so there's no meaningful distinction yet between "log in" and "connect GitHub." See `docs/future-source-control-integrations.md` for the parked design of what splitting this looks like, and why it isn't done now.
+
+**Step 4 — `GitHubAuthController`: ties the whole flow together, with state validation and the exchange-code handoff**
 
 ```java
 @RestController
@@ -450,13 +471,31 @@ public class GitHubAuthController {
 
     @GetMapping("/login")
     public void login(HttpServletResponse response) throws IOException {
-        String state = UUID.randomUUID().toString();
+        String state = TokenUtil.generateOpaqueToken();
+        Cookie stateCookie = new Cookie("oauth_state", state);
+        stateCookie.setHttpOnly(true);
+        stateCookie.setSecure(cookieSecure);
+        stateCookie.setPath("/auth/github");
+        stateCookie.setMaxAge(600);
+        response.addCookie(stateCookie);
         response.sendRedirect(gitHubOAuthService.buildAuthorizationUrl(state));
     }
 
     @GetMapping("/callback")
     public void callback(@RequestParam("code") String code,
+                          @RequestParam(value = "state", required = false) String returnedState,
+                          @CookieValue(value = "oauth_state", required = false) String expectedState,
                           HttpServletResponse response) throws IOException {
+
+        Cookie clearCookie = new Cookie("oauth_state", "");
+        clearCookie.setPath("/auth/github");
+        clearCookie.setMaxAge(0);
+        response.addCookie(clearCookie);
+
+        if (expectedState == null || returnedState == null ||
+            !TokenUtil.constantTimeEquals(expectedState, returnedState)) {
+            throw new UnauthorizedException("OAuth state mismatch - possible CSRF attempt");
+        }
 
         GitHubTokenResponse tokenResponse = gitHubOAuthService.exchangeCodeForToken(code);
         GitHubUserProfile profile = gitHubOAuthService.fetchUserProfile(tokenResponse.accessToken());
@@ -466,8 +505,8 @@ public class GitHubAuthController {
 
         AuthResponse authResponse = authService.login(user);   // Flow A kicks in here
 
-        String redirectUrl = String.format("%s/auth/callback?accessToken=%s&refreshToken=%s",
-            frontendUrl, authResponse.accessToken(), authResponse.refreshToken());
+        String loginCode = loginCodeService.issueCode(authResponse);
+        String redirectUrl = String.format("%s/auth/callback?code=%s", frontendUrl, loginCode);
 
         response.setStatus(HttpStatus.FOUND.value());
         response.setHeader("Location", redirectUrl);
@@ -475,7 +514,7 @@ public class GitHubAuthController {
 }
 ```
 
-**Where Flow A and Flow B meet:** the last line of `callback()` — `authService.login(user)` — is exactly the `login()` method from section 3.3, Step 3. GitHub OAuth is the *trigger*; the access/refresh token pattern is what actually issues our session.
+**Where Flow A and Flow B meet:** `authService.login(user)` inside `callback()` is exactly the `login()` method from section 3.3, Step 3. GitHub OAuth is the *trigger*; the access/refresh token pattern is what actually issues our session.
 
 ---
 
@@ -502,7 +541,7 @@ Save Repo row, status = PENDING
 IndexingClient: async POST to Python /index
    │
    ▼
-Python indexes → calls back PATCH /api/repos/{id}/index-status
+Python indexes → calls back PATCH /internal/repos/{id}/index-status
 ```
 
 This is the point where Flow A (who is this user) and Flow B (what can we do on their behalf against GitHub) both get used together — the controller reads the authenticated user's ID off the security context (populated by `JwtAuthFilter`), and `RepoCloneService` pulls that same user's *decrypted GitHub token* to actually authenticate the clone.
@@ -612,7 +651,7 @@ public class RepoCloneService {
 
 Note this pulls the token via `gitHubOAuthService.getDecryptedGitHubToken(...)` — the same credential store from Flow B, section 4.2. No separate token storage for cloning; it reuses what was captured at login.
 
-### 5.4 `RepoController` — ties browse, connect, and status together
+### 5.4 `RepoController` — ties browse, connect, status, and query together
 
 ```java
 @RestController
@@ -623,8 +662,9 @@ public class RepoController {
     private final IndexingClient indexingClient;
     private final RepoRepository repoRepository;
     private final GitHubService gitHubService;
+    private final RagQueryClient ragQueryClient;
 
-    // constructor omitted for brevity - standard DI of the four collaborators above
+    // constructor omitted for brevity - standard DI of the five collaborators above
 
     // Browse what's available on GitHub before connecting anything
     @GetMapping("/github/available")
@@ -648,22 +688,31 @@ public class RepoController {
         return ResponseEntity.ok(repoRepository.findByConnectedByUserId(currentUserId));
     }
 
+    // Every single-repo lookup uses this ownership-scoped helper - see
+    // section 8.5 for why this matters and why a wrong owner returns 404,
+    // not 403.
+    private Repo findOwnedRepoOrThrow(UUID repoId) {
+        UUID currentUserId = CurrentUserUtil.getCurrentUserId();
+        return repoRepository.findByIdAndConnectedByUserId(repoId, currentUserId)
+            .orElseThrow(() -> new ResourceNotFoundException("Repo not found: " + repoId));
+    }
+
     @GetMapping("/{id}/status")
     public ResponseEntity<String> getStatus(@PathVariable UUID id) {
-        Repo repo = repoRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Repo not found: " + id));
+        Repo repo = findOwnedRepoOrThrow(id);
         return ResponseEntity.ok(repo.getStatus().name());
     }
 
-    // Python calls this back when indexing finishes/fails - see section 5.1 diagram
-    @PatchMapping("/{id}/index-status")
-    public ResponseEntity<Void> updateIndexStatus(@PathVariable UUID id,
-                                                   @RequestBody IndexStatusUpdateRequest request) {
-        Repo repo = repoRepository.findById(id)
-            .orElseThrow(() -> new ResourceNotFoundException("Repo not found: " + id));
-        repo.setStatus(request.status());
-        repoRepository.save(repo);
-        return ResponseEntity.noContent().build();
+    // Ask a question - ownership + READY-status checked here BEFORE ever
+    // calling Python, which has no auth of its own by design.
+    @PostMapping("/{id}/query")
+    public ResponseEntity<QueryResponse> queryRepo(@PathVariable UUID id,
+                                                    @Valid @RequestBody QueryRequest request) {
+        Repo repo = findOwnedRepoOrThrow(id);
+        if (repo.getStatus() != IndexStatus.READY) {
+            throw new IllegalStateException("Repo is not ready for questions yet");
+        }
+        return ResponseEntity.ok(ragQueryClient.query(id, request.question()));
     }
 }
 ```
@@ -677,15 +726,18 @@ public class RepoController {
 | Sign/validate our session token | `JwtService` | `jwt.secret` config |
 | Login/refresh/logout orchestration | `AuthService` | `JwtService`, `RefreshTokenRepository` |
 | Revocable session record | `RefreshToken` entity | — |
+| Short-lived exchange code hand-off | `LoginCodeService` | in-memory (Phase 1), Redis later if multi-instance |
 | Per-request auth check | `JwtAuthFilter` | `JwtService` |
 | Route-level access rules | `SecurityConfig` | `JwtAuthFilter` |
 | GitHub OAuth handshake | `GitHubOAuthService` | GitHub API, `EncryptionService` |
 | Encrypted GitHub token storage | `GitHubCredential` entity | `EncryptionService` |
 | Symmetric encryption | `EncryptionService` | `encryption.secret-key` config |
-| Ties OAuth flow + issues our session | `GitHubAuthController` | `GitHubOAuthService`, `AuthService` |
+| Ties OAuth flow + issues our session | `GitHubAuthController` | `GitHubOAuthService`, `AuthService`, `LoginCodeService` |
 | List/browse GitHub repos, metadata | `GitHubService` | `GitHubOAuthService.getDecryptedGitHubToken()` |
 | Repo clone using stored GitHub token | `RepoCloneService` | `GitHubOAuthService.getDecryptedGitHubToken()` |
 | Hand-off to Python | `IndexingClient` | `python-service.base-url` config |
+| Proxying RAG queries with ownership check | `RagQueryClient` | called only after `RepoController` validates ownership |
+| Internal service-to-service auth | `InternalRepoController` | `internal.service-secret` config, fails app startup if blank |
 
 ---
 
@@ -714,7 +766,7 @@ Embed with HuggingFaceEmbeddings (local model, no API key needed for Phase 1)
 Store in PGVector, one collection per repo_id, same Postgres as Java
    │
    ▼
-PATCH back to Java: /api/repos/{id}/index-status  { status: READY | FAILED }
+PATCH back to Java: /internal/repos/{id}/index-status  { status: READY | FAILED }
 ```
 
 ```
@@ -818,8 +870,9 @@ def index_repository(repo_id: str, repo_path: str) -> None:
 
 def _report_status(repo_id: str, status: str, error_message: str | None = None) -> None:
     httpx.patch(
-        f"{settings.java_service_url}/api/repos/{repo_id}/index-status",
+        f"{settings.java_service_url}/internal/repos/{repo_id}/index-status",
         json={"status": status, "errorMessage": error_message},
+        headers={"X-Internal-Secret": settings.internal_service_secret},
         timeout=10.0,
     )
 ```
@@ -872,7 +925,7 @@ def answer_question(repo_id: str, question: str) -> QueryResponse:
     return QueryResponse(answer=result["result"], sources=sources)
 ```
 
-**Why no LangGraph here yet:** Phase 1 only needs one question in, one grounded answer out — a plain `RetrievalQA` chain does that completely. LangGraph earns its place in Phase 2, where the coding agent genuinely needs to loop (retrieve → reason → decide to inspect another file → reason again). Introducing a graph-based agent loop here would add real complexity with nothing behind it to justify it yet.
+**Why no LangGraph here yet:** Phase 1 only needs one question in, one grounded answer out — a plain `RetrievalQA` chain does that completely. LangGraph earns its place in Phase 2, where the coding agent genuinely needs to loop (retrieve → reason → decide to inspect another file → reason again). See `docs/phase2-plan-claude-code-integration.md` for the current plan there — introducing a graph-based agent loop here would add real complexity with nothing behind it to justify it yet.
 
 **Step 5 — Routers: the FastAPI equivalent of Java's `@RestController`**
 
@@ -896,7 +949,7 @@ async def query_repo(request: QueryRequest):
 ```
 1. User connects a repo → Java clones it, saves Repo row (status: PENDING)
 2. Java POSTs to Python /index → Python accepts, starts background task
-3. Python walks/chunks/embeds/stores → PATCHes Java's /index-status → READY
+3. Python walks/chunks/embeds/stores → PATCHes Java's /internal/repos/{id}/index-status → READY
 4. User asks a question → Java validates they can access this repo_id
 5. Java POSTs to Python /rag/query → Python retrieves + answers
 6. Java returns Python's { answer, sources } straight through to the frontend
@@ -908,248 +961,59 @@ Nowhere in this round trip does Python touch the `users`, `repos`, or `refresh_t
 
 ## 8. Security Hardening Pass
 
-Everything above (sections 1–8) reflects the *first working version* of
-Phase 1. A review afterward caught six real gaps — the kind that are easy to
-miss on a first pass because each individual piece looked reasonable in
-isolation, but the combination left real holes. All six are fixed as of this
-version. This section documents what changed and why, since the code samples
-in sections 3–4 above are now slightly out of date on these specific points
-(rather than rewrite every embedded snippet, the deltas are captured here).
+Everything above (sections 1–7) reflects the *first working version* of Phase 1. A review afterward caught six real gaps — the kind that are easy to miss on a first pass because each individual piece looked reasonable in isolation, but the combination left real holes. All six are fixed as of this version.
 
 ### 8.1 OAuth `state` — generated but never checked (fixed)
 
-**The gap:** `login()` generated a `state` value and sent it to GitHub, but
-`callback()` never read it back or compared it against anything. `state`
-exists specifically to prevent CSRF on the OAuth redirect — generating it
-without validating it provides *none* of that protection; it was decorative.
+**The gap:** `login()` generated a `state` value and sent it to GitHub, but `callback()` never read it back or compared it against anything. `state` exists specifically to prevent CSRF on the OAuth redirect — generating it without validating it provides *none* of that protection; it was decorative.
 
-**The fix:** `login()` now stores `state` in a short-lived (10 min), HttpOnly
-cookie scoped to `/auth/github`. `callback()` reads that cookie via
-`@CookieValue` and compares it against GitHub's returned `state` query
-param. Mismatch or missing cookie → `UnauthorizedException`, request
-rejected before any token exchange happens.
-
-```java
-@GetMapping("/login")
-public void login(HttpServletResponse response) throws IOException {
-    String state = TokenUtil.generateOpaqueToken();
-    Cookie stateCookie = new Cookie("oauth_state", state);
-    stateCookie.setHttpOnly(true);
-    stateCookie.setSecure(cookieSecure);     // false for local http, true in real deployments
-    stateCookie.setPath("/auth/github");
-    stateCookie.setMaxAge(600);
-    response.addCookie(stateCookie);
-    response.sendRedirect(gitHubOAuthService.buildAuthorizationUrl(state));
-}
-
-@GetMapping("/callback")
-public void callback(@RequestParam("code") String code,
-                      @RequestParam(value = "state", required = false) String returnedState,
-                      @CookieValue(value = "oauth_state", required = false) String expectedState,
-                      HttpServletResponse response) throws IOException {
-    if (expectedState == null || returnedState == null || !expectedState.equals(returnedState)) {
-        throw new UnauthorizedException("OAuth state mismatch - possible CSRF attempt");
-    }
-    // ... proceed with token exchange only after this check passes
-}
-```
+**The fix:** `login()` now stores `state` in a short-lived (10 min), HttpOnly cookie scoped to `/auth/github`. `callback()` reads that cookie via `@CookieValue` and compares it against GitHub's returned `state` query param, using a **constant-time comparison** (`TokenUtil.constantTimeEquals`, backed by `MessageDigest.isEqual`) rather than plain `.equals()`, since a naive comparison leaks timing information about how many leading characters matched. Mismatch or missing cookie → `UnauthorizedException`, request rejected before any token exchange happens.
 
 ### 8.2 Refresh tokens stored raw (fixed)
 
-**The gap:** `RefreshToken.token` stored the actual bearer credential in
-plaintext. A database leak would hand out immediately usable sessions for
-every user — the exact failure mode password hashing exists to prevent,
-just applied to a different kind of secret.
+**The gap:** `RefreshToken.token` stored the actual bearer credential in plaintext. A database leak would hand out immediately usable sessions for every user.
 
-**The fix:** the entity field is now `tokenHash`. A new `TokenUtil` class
-generates the raw token with `SecureRandom` (not `UUID.randomUUID()`, which
-is fine for uniqueness but isn't specified to be cryptographically
-unpredictable) and separately exposes `sha256Hex()`. `AuthService` hashes
-the raw token before persisting it, and returns the *raw* value to the
-caller exactly once, at issuance — it is never written to disk or logged in
-that form again. Every later lookup (`refresh()`, `logout()`) hashes the
-incoming value and matches against the stored hash.
-
-```java
-private String issueRefreshToken(UUID userId) {
-    String rawToken = TokenUtil.generateOpaqueToken();      // shown to the client once
-    RefreshToken refreshToken = new RefreshToken();
-    refreshToken.setTokenHash(TokenUtil.sha256Hex(rawToken)); // only the hash is persisted
-    refreshToken.setUserId(userId);
-    refreshToken.setExpiresAt(Instant.now().plus(refreshTokenExpiryDays, ChronoUnit.DAYS));
-    refreshTokenRepository.save(refreshToken);
-    return rawToken;
-}
-```
+**The fix:** the entity field is now `tokenHash`. `TokenUtil` generates the raw token with `SecureRandom` (not `UUID.randomUUID()`, which isn't specified to be cryptographically unpredictable) and separately exposes `sha256Hex()`. `AuthService` hashes the raw token before persisting it, and returns the *raw* value to the caller exactly once, at issuance — it is never written to disk or logged in that form again.
 
 ### 8.3 Tokens in the redirect URL (fixed)
 
-**The gap:** the original `callback()` redirected to
-`{frontendUrl}/auth/callback?accessToken=...&refreshToken=...` — both real,
-usable credentials sitting in a URL, which means browser history, server
-access logs, proxy logs, and `Referer` headers could all end up holding a
-live session token.
+**The gap:** the original `callback()` redirected to `{frontendUrl}/auth/callback?accessToken=...&refreshToken=...` — both real, usable credentials sitting in a URL, which means browser history, server access logs, proxy logs, and `Referer` headers could all end up holding a live session token.
 
-**The fix considered and rejected:** the obvious fix is "put the refresh
-token in an HttpOnly cookie instead." That's a reasonable pattern in
-general, but it doesn't fit this project cleanly: the dev-tools test harness
-(section on `dev-tools/`) is a plain `file://` page, and HttpOnly cookies
-set by `http://localhost:8080` interacting with a `file://` origin via
-CORS-with-credentials is genuinely inconsistent across browsers — no
-reliable `Origin` header, `SameSite` edge cases that differ by browser.
+**The fix considered and rejected:** the obvious fix is "put the refresh token in an HttpOnly cookie instead." That's a reasonable pattern in general, but it doesn't fit this project cleanly: the dev-tools test harness is a plain `file://` page, and HttpOnly cookies set by `http://localhost:8080` interacting with a `file://` origin via CORS-with-credentials is genuinely inconsistent across browsers.
 
-**The fix used instead:** a short-lived (60s), single-use, opaque exchange
-code. `LoginCodeService` holds a small in-memory map (`code -> AuthResponse`,
-with expiry). `callback()` calls `authService.login(user)` exactly as
-before, but instead of putting the result in the URL, it hands it to
-`loginCodeService.issueCode(...)` and redirects with only that code:
+**The fix used instead:** a short-lived (60s), single-use, opaque exchange code. `LoginCodeService` holds a small in-memory map (`code -> AuthResponse`, with expiry). `callback()` calls `authService.login(user)` exactly as before, but instead of putting the result in the URL, it hands it to `loginCodeService.issueCode(...)` and redirects with only that code. The frontend then trades that code for the real tokens via `POST /auth/exchange`, receiving them in a JSON response body — never a URL. `consumeCode` removes the entry on read (single-use) and checks expiry.
 
-```java
-AuthResponse authResponse = authService.login(user);
-String loginCode = loginCodeService.issueCode(authResponse);
-String redirectUrl = String.format("%s/auth/callback?code=%s", frontendUrl, loginCode);
-```
-
-The frontend (or the test harness) then trades that code for the real
-tokens via a POST, receiving them in a JSON response body — never a URL:
-
-```java
-@PostMapping("/exchange")
-public ResponseEntity<AuthResponse> exchange(@Valid @RequestBody ExchangeCodeRequest request) {
-    return ResponseEntity.ok(loginCodeService.consumeCode(request.code()));
-}
-```
-
-`consumeCode` removes the entry on read (single-use) and checks expiry — a
-leaked code is useless after one use or after 60 seconds, unlike a leaked
-token, which stays valid for its full lifetime (up to 7 days for a refresh
-token) wherever it ends up.
-
-**Known limitation, stated plainly:** `LoginCodeService`'s map is in-memory,
-single-process. Fine for Phase 1 (one instance). If this ever runs behind a
-load balancer with multiple instances, a code issued by instance A won't be
-visible to instance B — swap the map for Redis with a short TTL at that
-point; the calling code doesn't need to change.
+**Known limitation, stated plainly:** `LoginCodeService`'s map is in-memory, single-process. Fine for Phase 1 (one instance). If this ever runs behind a load balancer with multiple instances, swap the map for Redis with a short TTL — the calling code doesn't need to change.
 
 ### 8.4 Python → Java callback had no authentication (fixed)
 
-**The gap:** `internal_service_secret` existed in config on both sides, but
-nothing actually checked it. `PATCH /api/repos/{id}/index-status` was
-reachable by anyone who could reach the Java service at all — including
-normal end users — and would happily mark any repo `READY` or `FAILED` on
-request, no proof required that the caller was actually the Python service.
+**The gap:** `internal_service_secret` existed in config on both sides, but nothing actually checked it. `PATCH /api/repos/{id}/index-status` was reachable by anyone who could reach the Java service at all — including normal end users — and would happily mark any repo `READY` or `FAILED` on request.
 
-**The fix:** the endpoint moved out of `/api/repos/**` entirely, to
-`/internal/repos/{id}/index-status`, handled by a new
-`InternalRepoController`. `SecurityConfig` permits `/internal/**` at the
-Spring Security layer (there's no user JWT to check — Python isn't a logged
-in user), but `InternalRepoController` does its own manual check against a
-shared secret header:
+**The fix:** the endpoint moved out of `/api/repos/**` entirely, to `/internal/repos/{id}/index-status`, handled by a new `InternalRepoController`. `SecurityConfig` permits `/internal/**` at the Spring Security layer (there's no user JWT to check — Python isn't a logged in user), but `InternalRepoController` does its own manual check against a shared secret header, using the same constant-time comparison as the OAuth state check.
 
-```java
-@PatchMapping("/{id}/index-status")
-public void updateIndexStatus(@PathVariable UUID id,
-                               @RequestHeader(value = "X-Internal-Secret", required = false) String providedSecret,
-                               @RequestBody IndexStatusUpdateRequest request) {
-    verifyInternalSecret(providedSecret);
-    // ... update repo status
-}
-
-private void verifyInternalSecret(String providedSecret) {
-    if (configuredSecret == null || configuredSecret.isBlank()) {
-        logger.warning("internal.service-secret is not configured - /internal/** is UNPROTECTED");
-        return; // zero-config local dev only, loudly flagged
-    }
-    if (providedSecret == null || !configuredSecret.equals(providedSecret)) {
-        throw new UnauthorizedException("Invalid or missing internal service secret");
-    }
-}
-```
-
-Python's `_report_status()` sends that header, sourced from its own
-`INTERNAL_SERVICE_SECRET` — the two must be configured to the exact same
-value, which is why `docker-compose.yml` sources both from a single
-`.env` entry rather than letting them drift independently.
+**Fail-closed, not fail-open:** the app **refuses to start** if `INTERNAL_SERVICE_SECRET` isn't configured — `InternalRepoController`'s constructor throws `IllegalStateException` rather than falling back to "unprotected, with a warning logged." A configuration mistake should never silently disable authentication. This applies even in local dev — any placeholder value works, as long as it matches python-service's value exactly.
 
 ### 8.5 Missing ownership checks (fixed)
 
-**The gap:** `GET /api/repos/{id}`, `GET /api/repos/{id}/status`, and the
-query endpoint all looked repos up with plain `repoRepository.findById(id)`
-— which finds a repo regardless of who connected it. User A could read User
-B's repo status, or even ask questions about User B's private code, just by
-knowing (or guessing/enumerating) a UUID.
+**The gap:** `GET /api/repos/{id}`, `GET /api/repos/{id}/status`, and the query endpoint all looked repos up with plain `repoRepository.findById(id)` — which finds a repo regardless of who connected it. User A could read User B's repo status, or even ask questions about User B's private code, just by knowing (or guessing/enumerating) a UUID.
 
-**The fix:** a new repository method, and every single-repo lookup now
-routes through it:
+**The fix:** a new repository method, `findByIdAndConnectedByUserId(UUID id, UUID connectedByUserId)`, and every single-repo lookup now routes through a shared `findOwnedRepoOrThrow` helper in `RepoController`.
 
-```java
-// RepoRepository
-Optional<Repo> findByIdAndConnectedByUserId(UUID id, UUID connectedByUserId);
-
-// RepoController - one shared helper used by every endpoint that takes an {id}
-private Repo findOwnedRepoOrThrow(UUID repoId) {
-    UUID currentUserId = CurrentUserUtil.getCurrentUserId();
-    return repoRepository.findByIdAndConnectedByUserId(repoId, currentUserId)
-        .orElseThrow(() -> new ResourceNotFoundException("Repo not found: " + repoId));
-}
-```
-
-**Deliberate detail:** a repo that exists but belongs to someone else
-returns the *same* 404 as a repo that doesn't exist at all, rather than a
-403. This is intentional — a 403 confirms to the caller that the `repo_id`
-they guessed is real, just not theirs, which is itself information leakage.
-404 for both cases reveals nothing.
+**Deliberate detail:** a repo that exists but belongs to someone else returns the *same* 404 as a repo that doesn't exist at all, rather than a 403. This is intentional — a 403 confirms to the caller that the `repo_id` they guessed is real, just not theirs, which is itself information leakage. 404 for both cases reveals nothing.
 
 ### 8.6 Java and Python couldn't actually share cloned repos (fixed)
 
-**The gap:** the `repo_path` string that crosses from Java's
-`IndexingClient` to Python's `/index` only means anything if both processes
-can see that exact filesystem path. That's true when both run on the same
-machine during early local development, but false the moment they run as
-separate Docker containers — `/app/repos/123` in the Java container and
-`/app/repos/123` in the Python container are two *unrelated* empty
-directories, not the same folder.
+**The gap:** the `repo_path` string that crosses from Java's `IndexingClient` to Python's `/index` only means anything if both processes can see that exact filesystem path. That's true when both run on the same machine during early local development, but false the moment they run as separate Docker containers.
 
-**The fix:** a root `docker-compose.yml` gives both services a **shared
-named volume**, mounted at the same path (`/workspace/repos`) in both
-containers:
+**The fix:** a root `docker-compose.yml` gives both services a **shared named volume**, mounted at the same path (`/workspace/repos`) in both containers. Java clones into `/workspace/repos/<uuid>` inside its own container; because that path is backed by the same Docker volume, Python's container sees the exact same files at the exact same path.
 
-```yaml
-services:
-  java-service:
-    volumes:
-      - repo-data:/workspace/repos
-  python-service:
-    volumes:
-      - repo-data:/workspace/repos
-volumes:
-  repo-data:
-```
-
-Java clones into `/workspace/repos/<uuid>` inside its own container; because
-that path is backed by the same Docker volume, Python's container sees the
-exact same files at the exact same path. No code change was needed on
-either service's side — `REPO_STORAGE_PATH` was already externalized to
-config, this was purely a deployment/infrastructure fix.
-
-**Why this matters beyond Phase 1, with a correction:** an earlier version of
-this document said Phase 2's coding agent would "need this same shared-access
-pattern" — true in the narrow sense that Java and Python still need to agree
-on a filesystem, but stated too loosely. The agent almost certainly
-shouldn't edit the same master checkout this volume holds directly — two
-concurrent agent tasks editing one shared checkout is a race condition
-waiting to happen. The more likely Phase 2 shape is: this shared volume
-holds the canonical clone, and each agent task gets its own isolated copy or
-git worktree carved out from it, edited in a sandbox, then discarded (or
-turned into a diff/PR) when the task ends. That's a Phase 2 design decision,
-not something to build now — noted here so this document doesn't imply an
-architecture that hasn't actually been decided yet.
+**Why this matters beyond Phase 1, with a correction:** an earlier version of this document said Phase 2's coding agent would "need this same shared-access pattern" — true in the narrow sense that Java and Python still need to agree on a filesystem, but stated too loosely. The agent almost certainly shouldn't edit the same master checkout this volume holds directly — two concurrent agent tasks editing one shared checkout is a race condition waiting to happen. The more likely Phase 2 shape is: this shared volume holds the canonical clone, and each agent task gets its own isolated copy or git worktree carved out from it, edited in a sandbox, then discarded (or turned into a diff/PR) when the task ends. See `docs/phase2-plan-claude-code-integration.md` section 3 for how this is actually being designed.
 
 ---
 
 ## 9. What Comes Next (Not in This Document)
 
-- **Phase 2** — Coding agent: sandboxed file editing, test running, diff review (Python side, no Git writes yet)
+- **Phase 2** — Coding agent via Claude Code integration: sandboxed file editing, test running, diff review (Python side, no Git writes yet). See `docs/phase2-plan-claude-code-integration.md` for the current plan.
 - **Phase 3** — Git write ops: branch/commit/push/PR, gated behind human approval
 - Everything from Phase 3 onward reuses the *same* auth (Flow A) and GitHub credential storage (Flow B) built here — this is why getting these two flows right in Phase 1 matters disproportionately to how small they look on their own.
 - **Not roadmapped, parked instead** — separating platform login from GitHub-as-an-integration (so a second identity provider or a second source-control provider like Bitbucket/GitLab could be added without touching auth) is real target-state architecture, but has a hard prerequisite Phase 1 doesn't meet: an alternate way to become a platform user that isn't GitHub OAuth. See `docs/future-source-control-integrations.md` for the full design and exactly what has to become true before it's worth building.

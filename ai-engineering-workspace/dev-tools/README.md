@@ -25,10 +25,10 @@ Tighten both before deploying anywhere real (see each service's README).
 1. **Check both services** — confirms Java (`:8080`) and Python (`:8000`)
    are actually running before you try anything else.
 2. **Login with GitHub** — opens the OAuth flow in a new tab. After you
-   approve, Java redirects to `{frontendUrl}/auth/callback?accessToken=...&refreshToken=...`.
+   approve, Java redirects to `{frontendUrl}/auth/callback?code=...`.
    That path likely 404s (expected — nothing is built to live there yet).
-   Copy the two token values straight out of the browser's address bar and
-   paste them into the harness.
+   Copy the code value straight out of the browser's address bar and paste
+   it into the harness — it's short-lived (60s) and single-use.
 3. **Browse / connect / query** — the rest of the panels map directly to the
    endpoints documented in `docs/phase1-implementation-guide.md`.
 
@@ -38,6 +38,7 @@ failures — check there first if something doesn't behave as expected.
 ## Why tokens aren't persisted across reloads
 
 They're kept in a plain in-memory JS variable rather than `localStorage`, so
-you'll need to re-paste them if you refresh the page. This is a deliberate
-simplification for a throwaway dev tool — feel free to add `localStorage`
-yourself if the re-pasting gets annoying during a long testing session.
+you'll need to re-paste the login code if you refresh the page. This is a
+deliberate simplification for a throwaway dev tool — feel free to add
+`localStorage` yourself if the re-pasting gets annoying during a long
+testing session.

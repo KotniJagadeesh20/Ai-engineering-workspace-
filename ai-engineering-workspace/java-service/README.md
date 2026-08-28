@@ -71,6 +71,7 @@ export JWT_SECRET=$(openssl rand -base64 32)
 export ENCRYPTION_SECRET_KEY=$(openssl rand -base64 32)
 export GITHUB_CLIENT_ID=your_client_id
 export GITHUB_CLIENT_SECRET=your_client_secret
+export INTERNAL_SERVICE_SECRET=$(openssl rand -base64 32)
 
 # 3. Run
 mvn spring-boot:run
@@ -96,6 +97,7 @@ Service starts on `http://localhost:8080`.
 
 | Method | Path | Auth required | Purpose |
 |---|---|---|---|
+| GET | `/api/repos/github/available` | Yes | List the current user's GitHub repos, for a "pick a repo" screen before connecting |
 | POST | `/api/repos/connect` | Yes (Bearer access token) | Clone a GitHub repo, trigger async indexing |
 | GET | `/api/repos` | Yes | List repos connected by the current user |
 | GET | `/api/repos/{id}` | Yes (must own the repo) | Get a single repo's details |

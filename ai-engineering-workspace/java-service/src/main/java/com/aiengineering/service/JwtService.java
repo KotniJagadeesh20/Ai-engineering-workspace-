@@ -31,9 +31,6 @@ public class JwtService {
         @Value("${jwt.secret}") String secret,
         @Value("${jwt.access-token-expiry-minutes}") long accessTokenExpiryMinutes
     ) {
-        // HMAC-SHA key derived from the configured secret. In production, source
-        // this from a secrets manager (AWS Secrets Manager / Vault), not a plain
-        // env var checked into any config file.
         this.signingKey = Keys.hmacShaKeyFor(secret.getBytes(StandardCharsets.UTF_8));
         this.accessTokenExpiryMinutes = accessTokenExpiryMinutes;
     }

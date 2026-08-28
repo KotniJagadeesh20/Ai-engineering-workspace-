@@ -1,0 +1,17 @@
+# Java
+java-service/target/
+*.class
+
+# Python
+python-service/.venv/
+python-service/__pycache__/
+python-service/**/__pycache__/
+*.pyc
+python-service/.env
+
+# IDE / OS
+.idea/
+*.iml
+.vscode/
+.DS_Store
+*.log

@@ -17,9 +17,6 @@ import java.util.UUID;
  * Reads the "Authorization: Bearer <token>" header, validates the JWT,
  * and - if valid - populates the SecurityContext with the user's id so
  * downstream controllers can use @AuthenticationPrincipal / SecurityContextHolder.
- *
- * This is the equivalent of a standard Spring Security auth filter, just
- * checking our own signed JWT instead of a session cookie or Basic auth header.
  */
 public class JwtAuthFilter extends OncePerRequestFilter {
 
@@ -49,9 +46,6 @@ public class JwtAuthFilter extends OncePerRequestFilter {
                 );
                 SecurityContextHolder.getContext().setAuthentication(authentication);
             }
-            // If invalid, we simply don't authenticate - Spring Security's
-            // authorization rules (in SecurityConfig) will reject the request
-            // for any endpoint that requires authentication.
         }
 
         filterChain.doFilter(request, response);

@@ -28,7 +28,7 @@ import java.util.UUID;
  * value should never silently turn authentication off; it should stop the
  * app from starting at all. This applies even in local dev - set
  * INTERNAL_SERVICE_SECRET to any placeholder string locally (it just has to
- * match python-service's value); never leave it unset.
+ * match python-service's value), never leave it unset.
  */
 @RestController
 @RequestMapping("/internal/repos")

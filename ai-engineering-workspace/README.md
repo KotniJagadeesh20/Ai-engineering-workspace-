@@ -23,6 +23,10 @@ or a second identity provider could be added later without touching auth).
 It's deliberately not implemented — see its "Why this is parked" section for
 what has to become true first.
 
+`docs/phase2-plan-claude-code-integration.md` is the design for Phase 2 —
+integrating Claude Code's Agent SDK as the coding engine instead of building
+a custom agent loop. Planned, not yet implemented.
+
 ---
 
 ## Running everything with Docker Compose (recommended)
@@ -40,7 +44,7 @@ This starts Postgres (with pgvector), both services, and — critically —
 gives java-service and python-service a **shared Docker volume** for cloned
 repos. Without that, Java clones a repo to a path Python's container simply
 can't see, since they'd otherwise be separate filesystems. See
-`docs/phase1-implementation-guide.md` section 9 for the full explanation.
+`docs/phase1-implementation-guide.md` section 8 for the full explanation.
 
 ## Running each service manually (alternative, no Docker)
 
@@ -97,7 +101,7 @@ the implementation guide for the full architecture diagram.
 ## Roadmap (for context — only Phase 1 is built here)
 
 1. **Repository Intelligence** ← you are here
-2. Coding Agent (sandboxed editing, tests, diffs — no Git writes)
+2. Coding Agent (sandboxed editing, tests, diffs — no Git writes; planned via Claude Code integration, see docs/phase2-plan-claude-code-integration.md)
 3. Git Automation (branch/commit/push/PR, human-approval gated)
 4. Slack notifications
 5. CI/CD awareness (read GitHub Actions status)

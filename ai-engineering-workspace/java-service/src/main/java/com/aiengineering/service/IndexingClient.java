@@ -14,7 +14,7 @@ import org.springframework.web.reactive.function.client.WebClient;
  * do the indexing, then flips the repo's status when it's done.
  *
  * Fire-and-forget here for simplicity; Python should call back to
- * PATCH /api/repos/{id}/status when indexing finishes (or fails).
+ * PATCH /internal/repos/{id}/index-status when done (or failed).
  */
 @Service
 public class IndexingClient {

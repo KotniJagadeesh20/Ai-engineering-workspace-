@@ -81,7 +81,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
    deletes and recreates its collection first, so re-running indexing after a
    code change doesn't leave stale duplicate chunks behind.
 5. **Report back** — `httpx.patch(...)` to Java's
-   `/api/repos/{id}/index-status`, matching the callback Java's `IndexingClient`
+   `/internal/repos/{id}/index-status`, matching the callback Java's `IndexingClient`
    is waiting on (Java doesn't poll; Python reports when it's actually done).
 
 ---
@@ -92,9 +92,9 @@ Plain `RetrievalQA` chain — retrieve top-5 chunks, hand them + the question to
 Claude, return the answer plus the source files it drew from. No agent loop,
 no LangGraph yet. That's deliberate: Phase 1 only needs single-shot
 question-answering. Phase 2's coding agent is where a real loop (plan → act →
-observe → repeat) becomes necessary, and that's where LangGraph earns its
-place — introducing it here would just add complexity with nothing to show
-for it yet.
+observe → repeat) becomes necessary — see `docs/phase2-plan-claude-code-integration.md`
+for the current plan (integrating Claude Code's Agent SDK rather than
+building a custom LangGraph loop).
 
 ---
 

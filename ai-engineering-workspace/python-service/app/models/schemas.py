@@ -30,7 +30,7 @@ class QueryResponse(BaseModel):
 
 
 class IndexStatusCallback(BaseModel):
-    """What we PATCH back to Java's /api/repos/{id}/index-status once
+    """What we PATCH back to Java's /internal/repos/{id}/index-status once
     indexing finishes or fails. Mirrors Java's IndexStatusUpdateRequest DTO."""
     status: str  # "READY" or "FAILED" - kept as a plain string here since
                  # Python doesn't share Java's IndexStatus enum; Java's
