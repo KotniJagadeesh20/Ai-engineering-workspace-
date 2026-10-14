@@ -24,9 +24,13 @@ public class IndexingClient {
 
     public IndexingClient(
         @Value("${python-service.base-url}") String pythonServiceBaseUrl,
+        @Value("${internal.service-secret}") String internalSecret,
         RepoRepository repoRepository
     ) {
-        this.webClient = WebClient.builder().baseUrl(pythonServiceBaseUrl).build();
+        this.webClient = WebClient.builder()
+            .baseUrl(pythonServiceBaseUrl)
+            .defaultHeader("X-Internal-Secret", internalSecret)
+            .build();
         this.repoRepository = repoRepository;
     }
 
@@ -45,6 +49,7 @@ public class IndexingClient {
 
     private void markFailed(Repo repo) {
         repo.setStatus(IndexStatus.FAILED);
+        repo.setErrorMessage("Could not reach the indexing service");
         repoRepository.save(repo);
     }
 }

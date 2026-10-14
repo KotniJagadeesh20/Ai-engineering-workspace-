@@ -8,14 +8,16 @@ Pipeline: walk repo -> filter to code files -> chunk -> embed -> store in
 pgvector, in a collection named after the repo_id. Then report back to Java.
 """
 
+import functools
 import os
 import logging
+import threading
 
 import httpx
-from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_postgres import PGVector
+from sqlalchemy import create_engine, text
 from langchain_core.documents import Document
 
 from app.config import settings
@@ -40,6 +42,9 @@ EXCLUDED_DIRS = {
 # cut a function in half mid-body, which hurts retrieval quality - a common
 # Phase 1 upgrade is swapping this for RecursiveCharacterTextSplitter.from_language(...)
 # per file type once you've felt that pain on a real repo.
+# Skip huge generated/minified/data files - they bloat the index and add noise.
+MAX_FILE_BYTES = 1_000_000
+
 CHUNK_SIZE = 1000
 CHUNK_OVERLAP = 200
 
@@ -59,15 +64,18 @@ def _collect_documents(repo_path: str) -> list[Document]:
 
             file_path = os.path.join(root, filename)
             try:
-                loader = TextLoader(file_path, autodetect_encoding=True)
-                loaded = loader.load()
+                if os.path.getsize(file_path) > MAX_FILE_BYTES:
+                    logger.info("Skipping %s: larger than %d bytes", file_path, MAX_FILE_BYTES)
+                    continue
+                with open(file_path, encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                if not content.strip():
+                    continue
                 # Store a repo-relative path so answers can cite readable
                 # locations (e.g. "PaymentController.java") instead of the
                 # full /data/repos/<uuid>/... disk path.
                 relative_path = os.path.relpath(file_path, repo_path)
-                for doc in loaded:
-                    doc.metadata["source"] = relative_path
-                documents.extend(loaded)
+                documents.append(Document(page_content=content, metadata={"source": relative_path}))
             except Exception as e:
                 # Don't let one unreadable file (binary misdetected as text,
                 # weird encoding, etc) kill the whole indexing run.
@@ -76,22 +84,54 @@ def _collect_documents(repo_path: str) -> list[Document]:
     return documents
 
 
+@functools.lru_cache(maxsize=1)
 def _get_embeddings() -> HuggingFaceEmbeddings:
+    # Cached: loading the model is slow, so do it once per process.
     # Local model - no API key needed, good default for getting Phase 1
     # running without adding a paid dependency. Swap for OpenAIEmbeddings
     # (langchain-openai) later if retrieval quality needs improving.
     return HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
 
-def get_vectorstore(repo_id: str) -> PGVector:
-    """Returns the pgvector-backed store scoped to one repo's collection.
-    Reused by both indexing (writes) and RAG query (reads)."""
+def get_vectorstore(collection_name: str) -> PGVector:
+    """Returns the pgvector-backed store for one collection (the repo_id, or
+    a temporary staging name while re-indexing). Reused by both indexing
+    (writes) and RAG query (reads)."""
     return PGVector(
         embeddings=_get_embeddings(),
-        collection_name=repo_id,
+        collection_name=collection_name,
         connection=settings.database_url,
         use_jsonb=True,
     )
+
+
+_indexing_now: set[str] = set()
+_indexing_lock = threading.Lock()
+
+
+def try_claim_indexing(repo_id: str) -> bool:
+    """Marks repo_id as being indexed. Returns False if a run is already in flight."""
+    with _indexing_lock:
+        if repo_id in _indexing_now:
+            return False
+        _indexing_now.add(repo_id)
+        return True
+
+
+def _swap_collection(staging: str, final: str) -> None:
+    """Atomically replaces the live collection with the staging one, so
+    queries never see an empty or half-built index. Deleting a collection
+    cascades to its embeddings (FK ON DELETE CASCADE in langchain_postgres)."""
+    engine = create_engine(settings.database_url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM langchain_pg_collection WHERE name = :n"), {"n": final})
+            conn.execute(
+                text("UPDATE langchain_pg_collection SET name = :final WHERE name = :staging"),
+                {"final": final, "staging": staging},
+            )
+    finally:
+        engine.dispose()
 
 
 def index_repository(repo_id: str, repo_path: str) -> None:
@@ -111,12 +151,16 @@ def index_repository(repo_id: str, repo_path: str) -> None:
         )
         chunks = splitter.split_documents(documents)
 
-        vectorstore = get_vectorstore(repo_id)
-        # Clear out any previous indexing run for this repo before writing -
-        # otherwise re-indexing after a code change just appends duplicates.
-        vectorstore.delete_collection()
-        vectorstore.create_collection()
-        vectorstore.add_documents(chunks)
+        # Build into a staging collection, then swap it in atomically. Writing
+        # straight into the live collection would leave queries seeing an
+        # empty/partial index for the duration of the run, and a failed run
+        # would destroy the previous good index.
+        staging = f"{repo_id}__staging"
+        staging_store = get_vectorstore(staging)
+        staging_store.delete_collection()
+        staging_store.create_collection()
+        staging_store.add_documents(chunks)
+        _swap_collection(staging, repo_id)
 
         logger.info("Indexed %d chunks from %d files for repo %s",
                     len(chunks), len(documents), repo_id)
@@ -126,6 +170,9 @@ def index_repository(repo_id: str, repo_path: str) -> None:
     except Exception as e:
         logger.exception("Indexing failed for repo %s", repo_id)
         _report_status(repo_id, status="FAILED", error_message=str(e))
+    finally:
+        with _indexing_lock:
+            _indexing_now.discard(repo_id)
 
 
 def _report_status(repo_id: str, status: str, error_message: str | None = None) -> None:

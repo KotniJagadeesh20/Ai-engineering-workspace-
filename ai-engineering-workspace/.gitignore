@@ -15,3 +15,13 @@ python-service/.env
 .vscode/
 .DS_Store
 *.log
+
+# Secrets
+.env
+
+# Node
+node_modules/
+frontend/dist/
+
+# Tests
+.pytest_cache/

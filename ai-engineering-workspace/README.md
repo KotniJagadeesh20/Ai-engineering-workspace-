@@ -10,7 +10,8 @@ Two services, split by responsibility:
 java-service/     — the platform layer: auth, GitHub OAuth, repo CRUD
 python-service/   — the intelligence layer: RAG indexing, question answering
 docs/             — full implementation reference, both services, plus parked future-architecture designs
-dev-tools/        — a plain-HTML test harness (not the product UI)
+frontend/         — the web UI (React + Vite): sign in, connect repos, ask questions
+dev-tools/        — a plain-HTML test harness for poking the APIs directly
 ```
 
 Start with **`docs/phase1-implementation-guide.md`** — it walks through both
@@ -39,6 +40,11 @@ cp .env.example .env
 
 docker compose up --build
 ```
+
+Then open **http://localhost:3000**. For the UI outside Docker:
+`cd frontend && npm install && npm run dev` (needs java-service on :8080;
+set `VITE_API_URL` to change that). Your GitHub OAuth app's callback URL stays
+`http://localhost:8080/auth/github/callback`.
 
 This starts Postgres (with pgvector), both services, and — critically —
 gives java-service and python-service a **shared Docker volume** for cloned

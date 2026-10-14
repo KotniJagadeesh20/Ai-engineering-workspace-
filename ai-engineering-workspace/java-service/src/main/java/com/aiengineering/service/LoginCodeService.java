@@ -38,6 +38,8 @@ public class LoginCodeService {
     private final Map<String, PendingLogin> pendingLogins = new ConcurrentHashMap<>();
 
     public String issueCode(AuthResponse authResponse) {
+        Instant now = Instant.now();
+        pendingLogins.values().removeIf(p -> p.expiresAt().isBefore(now)); // evict unused expired codes
         String code = TokenUtil.generateOpaqueToken();
         pendingLogins.put(code, new PendingLogin(authResponse, Instant.now().plusSeconds(CODE_TTL_SECONDS)));
         return code;

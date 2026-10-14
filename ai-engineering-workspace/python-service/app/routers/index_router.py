@@ -3,10 +3,14 @@ Equivalent of Java's @RestController. FastAPI's APIRouter groups related
 endpoints the same way a Spring @RequestMapping-annotated controller does.
 """
 
-from fastapi import APIRouter, BackgroundTasks
+import os
+
+from fastapi import APIRouter, BackgroundTasks, HTTPException
+
+from app.config import settings
 
 from app.models.schemas import IndexRequest, IndexAcceptedResponse
-from app.services.indexing_service import index_repository
+from app.services.indexing_service import index_repository, try_claim_indexing
 
 router = APIRouter()
 
@@ -20,5 +24,15 @@ async def trigger_index(request: IndexRequest, background_tasks: BackgroundTasks
     body. Indexing finishes asynchronously; Python reports back via PATCH to
     Java's /internal/repos/{id}/index-status when done (or failed).
     """
-    background_tasks.add_task(index_repository, request.repo_id, request.repo_path)
+    root = os.path.realpath(settings.repo_storage_path)
+    resolved = os.path.realpath(request.repo_path)
+    if os.path.commonpath([root, resolved]) != root or resolved == root:
+        raise HTTPException(status_code=400, detail="repo_path must be inside the repo storage directory")
+    if not os.path.isdir(resolved):
+        raise HTTPException(status_code=400, detail="repo_path does not exist")
+
+    if not try_claim_indexing(request.repo_id):
+        raise HTTPException(status_code=409, detail="Indexing already in progress for this repo")
+
+    background_tasks.add_task(index_repository, request.repo_id, resolved)
     return IndexAcceptedResponse()

@@ -9,6 +9,7 @@ import com.aiengineering.repository.UserRepository;
 import com.aiengineering.util.TokenUtil;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
@@ -46,25 +47,35 @@ public class AuthService {
         return new AuthResponse(accessToken, rawRefreshToken, jwtService.getAccessTokenExpirySeconds());
     }
 
+    /**
+     * Rotates the refresh token: the presented token is revoked and a new one
+     * issued. If an already-revoked token is presented, it was either replayed
+     * or stolen, so every session for that user is revoked.
+     */
+    // noRollbackFor: the revoke-all on reuse detection must commit even though we throw.
+    @Transactional(noRollbackFor = UnauthorizedException.class)
     public AuthResponse refresh(String refreshTokenValue) {
         String hash = TokenUtil.sha256Hex(refreshTokenValue);
 
         RefreshToken stored = refreshTokenRepository.findByTokenHash(hash)
-            .filter(rt -> !rt.isRevoked() && rt.getExpiresAt().isAfter(Instant.now()))
             .orElseThrow(() -> new UnauthorizedException("Invalid or expired refresh token"));
+
+        if (stored.isRevoked()) {
+            refreshTokenRepository.findByUserId(stored.getUserId()).forEach(rt -> rt.setRevoked(true));
+            throw new UnauthorizedException("Refresh token reuse detected - please log in again");
+        }
+        if (!stored.getExpiresAt().isAfter(Instant.now())) {
+            throw new UnauthorizedException("Invalid or expired refresh token");
+        }
 
         User user = userRepository.findById(stored.getUserId())
             .orElseThrow(() -> new UnauthorizedException("User no longer exists"));
 
+        stored.setRevoked(true);
         String newAccessToken = jwtService.generateAccessToken(user);
+        String newRefreshToken = issueRefreshToken(user.getId());
 
-        // Reuse the same refresh token (simple rotation-free approach for Phase 1).
-        // For stronger security later, rotate: revoke this one and issue a new one
-        // on every refresh call ("refresh token rotation"). We return the SAME raw
-        // value the client already has - we can't reconstruct it from the hash
-        // (that's the point of hashing), so rotation-free reuse is what lets the
-        // client keep using the same raw token it was originally given.
-        return new AuthResponse(newAccessToken, refreshTokenValue, jwtService.getAccessTokenExpirySeconds());
+        return new AuthResponse(newAccessToken, newRefreshToken, jwtService.getAccessTokenExpirySeconds());
     }
 
     public void logout(String refreshTokenValue) {

@@ -229,6 +229,7 @@ async function refreshAccessToken() {
   try {
     const data = await call('POST', javaUrl() + '/auth/refresh', { refreshToken: state.refreshToken }, false);
     state.accessToken = data.accessToken;
+    state.refreshToken = data.refreshToken; // refresh tokens rotate - keep the newest
     document.getElementById('accessToken').value = data.accessToken;
     document.getElementById('authDot').className = 'status-dot on';
   } catch (e) { /* already logged */ }
@@ -251,8 +252,8 @@ async function listAvailableRepos() {
     (repos || []).forEach(r => {
       const div = document.createElement('div');
       div.className = 'repo-item';
-      div.innerHTML = `<span>${r.fullName}</span><span class="badge">${r.private ? 'private' : 'public'}</span>`;
-      div.onclick = () => { document.getElementById('connectUrl').value = r.cloneUrl; };
+      div.innerHTML = `<span>${r.full_name}</span><span class="badge">${r.private ? 'private' : 'public'}</span>`;
+      div.onclick = () => { document.getElementById('connectUrl').value = r.clone_url; };
       container.appendChild(div);
     });
   } catch (e) { /* already logged */ }

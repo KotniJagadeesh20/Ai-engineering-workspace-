@@ -49,9 +49,8 @@ as-is (the JWT secret and encryption key especially — see below).
 | `COOKIE_SECURE` | Whether the OAuth state cookie requires HTTPS | `false` for local http dev, `true` for any real deployment |
 | `CORS_ALLOWED_ORIGINS` | Comma-separated origins allowed to call this API from a browser | `*` for local dev only |
 
-**Important:** the shipped defaults for `JWT_SECRET` and
-`ENCRYPTION_SECRET_KEY` are placeholders only. Generate real values before
-running anything beyond a local smoke test:
+**Important:** `JWT_SECRET` and `ENCRYPTION_SECRET_KEY` have no defaults -
+the app refuses to start without them. Generate real values:
 
 ```bash
 openssl rand -base64 32
@@ -162,11 +161,14 @@ as of this version:
 - `LoginCodeService` (the exchange-code mechanism) is in-memory, single
   instance. Fine for Phase 1 (one process); swap for a shared store (Redis
   with a short TTL) before running multiple instances behind a load balancer.
-- Refresh tokens are reused (not rotated) on every `/auth/refresh` call.
-  Fine for Phase 1; consider rotation (revoke + reissue) later for tighter
-  security.
-- `spring.jpa.hibernate.ddl-auto: update` is a dev convenience. Switch to
-  Flyway or Liquibase migrations before this has real data you care about.
+- Refresh tokens rotate on every `/auth/refresh`; clients must store the new
+  one. Reusing an old token revokes all of that user's sessions.
+- Schema is managed by Flyway (`src/main/resources/db/migration`). Hibernate
+  only validates it (`ddl-auto: validate`). To change an entity, add a new
+  `V<n>__description.sql` file - never edit an applied migration.
+- `POST /api/repos/connect` returns 202 immediately and clones in the
+  background; poll `GET /api/repos/{id}/status` (CLONING -> PENDING -> INDEXING
+  -> READY, or FAILED with `errorMessage`).
 - No rate limiting anywhere yet.
 
 ---

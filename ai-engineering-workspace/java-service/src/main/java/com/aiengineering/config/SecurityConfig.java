@@ -3,6 +3,8 @@ package com.aiengineering.config;
 import com.aiengineering.filter.JwtAuthFilter;
 import com.aiengineering.service.JwtService;
 import org.springframework.context.annotation.Bean;
+import org.springframework.http.HttpStatus;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
@@ -25,6 +27,8 @@ public class SecurityConfig {
             // Stateless JWT API - no CSRF tokens, no server-side sessions.
             .csrf(AbstractHttpConfigurer::disable)
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            // Missing/expired token -> 401 (not Spring's default 403) so clients know to refresh.
+            .exceptionHandling(e -> e.authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)))
             .authorizeHttpRequests(auth -> auth
                 // Public: starting/completing GitHub OAuth, exchanging a
                 // one-time login code, and refreshing tokens (refresh has

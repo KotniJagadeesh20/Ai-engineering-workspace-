@@ -40,7 +40,7 @@ services:
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:?set your GitHub OAuth App client id}
       GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:?set your GitHub OAuth App client secret}
       GITHUB_REDIRECT_URI: http://localhost:8080/auth/github/callback
-      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:5500}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
       REPO_STORAGE_PATH: /workspace/repos
       PYTHON_SERVICE_URL: http://python-service:8000
       INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?set a real value - must match python-service's}
@@ -53,18 +53,31 @@ services:
 
   python-service:
     build: ./python-service
-    ports:
-      - "8000:8000"
+    # Internal only: reachable by java-service over the compose network, not
+    # published to the host. Use `docker compose exec` for debugging.
+    expose:
+      - "8000"
     environment:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/ai_engineering
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:?set your Anthropic API key}
       JAVA_SERVICE_URL: http://java-service:8080
+      REPO_STORAGE_PATH: /workspace/repos
       INTERNAL_SERVICE_SECRET: ${INTERNAL_SERVICE_SECRET:?set a real value - must match java-service's}
     volumes:
       - repo-data:/workspace/repos
     depends_on:
       postgres:
         condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: ${PUBLIC_API_URL:-http://localhost:8080}
+    ports:
+      - "3000:80"
+    depends_on:
+      - java-service
 
 volumes:
   postgres-data:

@@ -10,6 +10,10 @@ import java.util.UUID;
 public interface RepoRepository extends JpaRepository<Repo, UUID> {
     List<Repo> findByConnectedByUserId(UUID userId);
 
+    List<Repo> findByStatus(com.aiengineering.entity.IndexStatus status);
+
+    boolean existsByConnectedByUserIdAndGithubUrlAndStatusNot(UUID userId, String githubUrl, com.aiengineering.entity.IndexStatus status);
+
     // Ownership-scoped lookup - used everywhere a repo is fetched by id so
     // one user can never read/query another user's repo just by guessing or
     // observing a UUID. Returns empty (not the repo) if it exists but isn't

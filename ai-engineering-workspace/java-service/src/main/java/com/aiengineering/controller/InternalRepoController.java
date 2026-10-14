@@ -70,6 +70,12 @@ public class InternalRepoController {
         Repo repo = repoRepository.findById(id)
             .orElseThrow(() -> new ResourceNotFoundException("Repo not found: " + id));
         repo.setStatus(request.status());
+        String error = request.errorMessage();
+        if (request.status() == com.aiengineering.entity.IndexStatus.FAILED && error != null) {
+            repo.setErrorMessage(error.length() > 2000 ? error.substring(0, 2000) : error);
+        } else {
+            repo.setErrorMessage(null);
+        }
         repoRepository.save(repo);
     }
 

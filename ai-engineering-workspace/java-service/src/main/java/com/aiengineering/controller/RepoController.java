@@ -6,13 +6,14 @@ import com.aiengineering.dto.QueryResponse;
 import com.aiengineering.dto.RepoConnectRequest;
 import com.aiengineering.entity.IndexStatus;
 import com.aiengineering.entity.Repo;
+import com.aiengineering.exception.ConflictException;
 import com.aiengineering.exception.ResourceNotFoundException;
 import com.aiengineering.repository.RepoRepository;
 import com.aiengineering.service.GitHubService;
-import com.aiengineering.service.IndexingClient;
 import com.aiengineering.service.RagQueryClient;
 import com.aiengineering.service.RepoCloneService;
 import com.aiengineering.util.CurrentUserUtil;
+import com.aiengineering.util.GitHubUrl;
 import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -25,20 +26,17 @@ import java.util.UUID;
 public class RepoController {
 
     private final RepoCloneService repoCloneService;
-    private final IndexingClient indexingClient;
     private final RepoRepository repoRepository;
     private final GitHubService gitHubService;
     private final RagQueryClient ragQueryClient;
 
     public RepoController(
         RepoCloneService repoCloneService,
-        IndexingClient indexingClient,
         RepoRepository repoRepository,
         GitHubService gitHubService,
         RagQueryClient ragQueryClient
     ) {
         this.repoCloneService = repoCloneService;
-        this.indexingClient = indexingClient;
         this.repoRepository = repoRepository;
         this.gitHubService = gitHubService;
         this.ragQueryClient = ragQueryClient;
@@ -60,10 +58,21 @@ public class RepoController {
     public ResponseEntity<Repo> connectRepo(@Valid @RequestBody RepoConnectRequest request) {
         UUID currentUserId = CurrentUserUtil.getCurrentUserId();
 
-        Repo repo = repoCloneService.cloneAndSave(request.githubUrl(), currentUserId);
-        indexingClient.triggerIndex(repo); // async hand-off to the Python service
+        if (repoRepository.existsByConnectedByUserIdAndGithubUrlAndStatusNot(
+                currentUserId, GitHubUrl.parse(request.githubUrl()).url(), IndexStatus.FAILED)) {
+            throw new ConflictException("This repository is already connected");
+        }
 
-        return ResponseEntity.ok(repo);
+        Repo repo = repoCloneService.createPending(request.githubUrl(), currentUserId);
+        try {
+            repoCloneService.cloneAndIndex(repo.getId()); // runs in the background
+        } catch (org.springframework.core.task.TaskRejectedException e) {
+            repoCloneService.markFailed(repo, "Server is busy cloning other repositories");
+            throw e;
+        }
+
+        // 202: accepted, not finished. Poll GET /api/repos/{id}/status.
+        return ResponseEntity.accepted().body(repo);
     }
 
     @GetMapping
@@ -110,7 +119,7 @@ public class RepoController {
         Repo repo = findOwnedRepoOrThrow(id);
 
         if (repo.getStatus() != IndexStatus.READY) {
-            throw new IllegalStateException(
+            throw new ConflictException(
                 "Repo is not ready for questions yet (status: " + repo.getStatus() + ")");
         }
 

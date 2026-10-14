@@ -10,14 +10,23 @@ spring:
     password: ${DB_PASSWORD:postgres}
   jpa:
     hibernate:
-      ddl-auto: update   # dev convenience only - use Flyway/Liquibase migrations for production
+      ddl-auto: validate   # schema is owned by Flyway (db/migration); Hibernate only checks it matches
     properties:
       hibernate:
         format_sql: true
     show-sql: false
 
+  flyway:
+    enabled: true
+    # The DB may already hold tables not created by Flyway (older dev DBs
+    # built by Hibernate, or the Python service's pgvector tables if it starts
+    # first). Baseline at 0 so V1 and V2 still run; both are idempotent.
+    baseline-on-migrate: true
+    baseline-version: 0
+
 jwt:
-  secret: ${JWT_SECRET:change-this-to-a-long-random-secret-in-prod-min-256-bits}
+  # REQUIRED, no default: the app refuses to start without it (min 32 bytes).
+  secret: ${JWT_SECRET}
   access-token-expiry-minutes: ${JWT_ACCESS_EXPIRY:15}
   refresh-token-expiry-days: ${JWT_REFRESH_EXPIRY:7}
 
@@ -29,7 +38,7 @@ github:
 
 encryption:
   # 32-byte (256-bit) base64 key for AES-GCM encryption of stored GitHub tokens
-  secret-key: ${ENCRYPTION_SECRET_KEY:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+  secret-key: ${ENCRYPTION_SECRET_KEY}
 
 app:
   frontend-url: ${FRONTEND_URL:http://localhost:3000}

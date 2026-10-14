@@ -22,14 +22,24 @@ public class Repo {
     @Column(nullable = false)
     private String githubUrl;
 
+    // Source-control provider; only "github" today.
+    @Column(nullable = false, length = 32)
+    private String provider = "github";
+
     private String name;
     private String owner;
 
+    // Server-side filesystem path - internal, never serialized to clients.
+    @com.fasterxml.jackson.annotation.JsonIgnore
     @Column(nullable = false)
     private String localPath;
 
     @Enumerated(EnumType.STRING)
     private IndexStatus status = IndexStatus.PENDING;
+
+    // Populated when status == FAILED (reported by the Python service).
+    @Column(length = 2000)
+    private String errorMessage;
 
     @Column(nullable = false)
     private UUID connectedByUserId;
